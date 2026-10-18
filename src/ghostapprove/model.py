@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 
 RISKS = ("low", "medium", "high", "critical")
@@ -28,11 +29,16 @@ class RequestError(ValueError):
 
 
 def canonical_json(content: dict) -> str:
+    """Serialise canonical content in the one form the hash is taken
+    over: sorted keys, compact separators, UTF-8, no ASCII escaping.
+    Keeping this in exactly one place is what makes a hash recomputed
+    later comparable with the hash recorded at ingest."""
     return json.dumps(content, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False)
 
 
 def content_hash(content: dict) -> str:
+    """The exact hash of a request: sha256 hex of its canonical JSON."""
     return hashlib.sha256(canonical_json(content).encode("utf-8")).hexdigest()
 
 
@@ -46,6 +52,12 @@ def short_hash(full_hash) -> str:
 
 
 def validate_id(raw) -> str:
+    """Validate a request id, or raise RequestError.
+
+    Ids double as record file names, so the allowed shape is strict:
+    letters, digits, dot, underscore, or hyphen, starting with a
+    letter or digit, at most 128 characters, and never a path
+    traversal fragment. Returns the id unchanged when it is valid."""
     if not isinstance(raw, str) or not _ID_RE.match(raw):
         raise RequestError(
             "id must be a string of letters, digits, '.', '_' or '-', "
@@ -60,6 +72,21 @@ def normalise_request(raw) -> tuple[dict, str | None]:
 
     Returns (canonical_content, requested_id_or_None).
     Raises RequestError on any invalid field.
+
+    Normalisation rules a producer can rely on:
+
+    - ``action`` and ``summary`` are required and must be non-empty
+      strings; ``title`` is accepted as a fallback for ``action``
+      and ``description`` as a fallback for ``summary``, and the
+      canonical content always uses the ``action`` / ``summary``
+      names.
+    - ``source`` defaults to ``manual`` and ``risk`` to ``medium``;
+      a risk outside low, medium, high, critical is refused rather
+      than guessed.
+    - ``diff``, ``payload``, and ``requested_by`` are optional and
+      are carried into the canonical content exactly as given.
+    - Leading and trailing whitespace is stripped from ``action``,
+      ``summary``, and ``source``; the risk value is lowercased.
     """
     if not isinstance(raw, dict):
         raise RequestError("request must be a JSON object")
@@ -99,6 +126,22 @@ def normalise_request(raw) -> tuple[dict, str | None]:
         raise RequestError("'requested_by' must be a string when present")
 
     payload = raw.get("payload")  # any JSON value, may be absent/None
+    # Reject non-finite numbers anywhere inside the payload. Python's
+    # json parser accepts bare NaN / Infinity tokens, and its writer
+    # would store them back verbatim, leaving a record file that is
+    # not strict JSON and that no other tool can read back exactly.
+    # Walk iteratively so a deeply nested payload adds no recursion.
+    stack = [payload]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, float) and not math.isfinite(item):
+            raise RequestError(
+                "'payload' must not contain NaN or Infinity values; "
+                "refusing rather than storing non-standard JSON")
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
 
     content = {
         "source": source,

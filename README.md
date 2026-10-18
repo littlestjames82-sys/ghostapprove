@@ -8,6 +8,8 @@ GhostApprove is the shared queue in front of all of them. A tool writes a small 
 
 By Ghost Developer Studio. GhostApprove is the approval companion in the GhostSlice family.
 
+Contents: [The one rule that matters](#the-one-rule-that-matters) · [Quick start](#quick-start) · [What you need](#what-you-need) · [The everyday commands](#the-everyday-commands) · [Why the hash is required](#why-the-hash-is-required) · [The request file](#the-request-file) · [Common refusals](#common-refusals-and-what-they-mean) · [The store](#the-store) · [What GhostApprove does not do](#what-ghostapprove-does-not-do)
+
 ## The one rule that matters
 
 **GhostApprove records decisions. It never carries them out.**
@@ -16,9 +18,35 @@ Approving a request here does not run it, deploy it, send it, or change anything
 
 And nothing is ever approved automatically. No timeout, no risk rule, no `--yes`, no `--all`, no config or environment variable approves anything. A request stays pending until a human runs an approve or deny command naming its exact hash.
 
+## Quick start
+
+The whole workflow is six steps, and [`examples/WALKTHROUGH.md`](examples/WALKTHROUGH.md) shows a complete run with real output:
+
+1. A producer writes a request file (see [The request file](#the-request-file)).
+2. `ingest` puts it in the queue and prints its id and exact hash.
+3. `list` shows what is waiting; `show <id>` shows one request in full.
+4. `approve` or `deny` records a decision, but only when you name the exact hash from `show`.
+5. `history` replays the ledger, so anyone can audit what was asked and what was decided.
+6. `verify` checks the whole store still agrees with itself (read-only).
+
 ## What you need
 
 Python 3.10 or newer. No accounts, no network, no dependencies.
+
+Run it without installing, from the GhostApprove folder, by putting `src` on `PYTHONPATH` (the form used throughout this README):
+
+```bash
+PYTHONPATH=src python3 -m ghostapprove --help
+```
+
+Or install it to get the shorter `ghostapprove` command; the two forms are equivalent:
+
+```bash
+pip install -e .
+ghostapprove --help
+```
+
+Every command and flag is also documented by the built-in help: `ghostapprove --help`, or per command, for example `ghostapprove approve --help`.
 
 ## The everyday commands
 
@@ -40,11 +68,30 @@ PYTHONPATH=src python3 -m ghostapprove --store .ghostapprove deny    req-ghostde
 
 # 5. Audit everything that happened, in order
 PYTHONPATH=src python3 -m ghostapprove --store .ghostapprove history
+
+# 6. Verify the whole store still agrees with itself (read-only)
+PYTHONPATH=src python3 -m ghostapprove --store .ghostapprove verify
 ```
 
-Every command also accepts `--json`. `list` accepts `--status pending|approved|denied|all` and `--source <name>`. `history` accepts `--id <id>`. Human `list` rows and the `show` view also display how long a request has been waiting (age, display only; it never affects a decision).
+`verify` (alias `audit`) checks every record and ledger event, not just the one id being decided: each record recomputes to its stored hash, has exactly one `ingested` event carrying that hash, and any decision event names a recorded, ingested request with the exact hash and is the only decision for its id. It reports counts by status and one line per problem, exits 0 when the store is sound and 1 when it is not, and writes nothing either way.
 
-Exit codes: 0 success, 1 decision refused (hash mismatch, already decided, unknown id), 2 invalid request or store error.
+Every command also accepts `--json`. `list` accepts `--status pending|approved|denied|all` and `--source <name>`. `history` accepts `--id <id>`. `verify` exits 1 (rather than 0) when it finds integrity problems. Human `list` rows and the `show` view also display how long a request has been waiting (age, display only; it never affects a decision).
+
+Notes on the details:
+
+- `ingest` also reads from stdin: pass `-` as the file path, as in `cat request.json | ... ingest -`.
+- `--store` may be given before the command (as above) or after it; when both are given, the one after the command wins. The store path resolves in this order: the `--store` / `--queue` flags, then `$GHOSTAPPROVE_DIR` (the aliases `$GHOSTAPPROVE_QUEUE` and `$GHOSTAPPROVE_HOME` are also honoured), then `./.ghostapprove`.
+- `--by` on `approve` / `deny` defaults to `local-operator`. It is a label recorded in the ledger, not an authentication.
+- `deny` accepts `--reason` as an alias for `--note`. Either way, the text is recorded as the decision note.
+- JSON output always carries the full hash; only the human `list` and `history` views shorten it to 12 characters.
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Success: the request was ingested, the decision was recorded, or `verify` found no problems |
+| 1 | Refused: hash mismatch, already decided, unknown or unrecorded id, or a duplicate ingest id; or `verify` found integrity problems. Nothing was written |
+| 2 | Invalid request or store error: bad JSON, a missing required field, an unknown risk value, or a damaged record or ledger. Nothing was written |
 
 ## Why the hash is required
 
@@ -59,7 +106,18 @@ If any check fails, the decision is refused and **nothing is written**. A record
 
 ## The request file
 
-One JSON file per request. Required: `action` (what is being asked) and `summary` (why, in plain words). Also recognised:
+One JSON file per request. Required: `action` (what is being asked) and `summary` (why, in plain words). The smallest useful request is:
+
+```json
+{
+  "action": "Post a short build-status note to the shared board",
+  "summary": "Keep the board current after the build dispatch.",
+  "source": "ghostbridge",
+  "risk": "low"
+}
+```
+
+With no `id` in the file, one is generated at ingest. Also recognised:
 
 | Field | Meaning |
 |---|---|
@@ -70,9 +128,27 @@ One JSON file per request. Required: `action` (what is being asked) and `summary
 | `requested_by` | Optional label for who or what raised the request |
 | `id` | Optional. Must be unique; re-using an existing id is refused. Generated from the content hash when omitted |
 
+Two producer conveniences are normalised at ingest: `title` is accepted as a fallback for `action`, and `description` as a fallback for `summary`. The stored record and the hash always use the canonical `action` and `summary` names, whichever spelling the producer wrote.
+
 Producers: **never put a raw secret value in a request.** Name a secret by reference only. The store is a local file, but treat it as sensitive anyway, and keep it out of git.
 
 Four ready-made requests are in `examples/` (one per source), with a worked run in `examples/WALKTHROUGH.md`.
+
+## Common refusals and what they mean
+
+A refusal is the tool working as designed: it writes nothing and explains itself on stderr. The ones an operator is most likely to meet:
+
+| Message (paraphrased) | Exit | What happened, and what to do |
+|---|---|---|
+| `hash mismatch: supplied --hash does not equal the exact hash on record` | 1 | The hash you passed is not the hash `show` prints for this id. Re-run `show <id>`, copy the full hash exactly, and try again |
+| `the record was edited after ingest` | 1 | The stored record no longer hashes to the hash on record. Do not decide it: ask the producer to re-issue the request so it is ingested cleanly |
+| `is already approved` / `is already denied` | 1 | The request already has a decision, and a request can only be decided once. Check `history --id <id>` to see who decided it and when |
+| `no such request` | 1 | No record exists under that id. Check the spelling against `list --status all` |
+| `has no 'ingested' ledger event` | 1 | A record file exists without its ledger event, so it was never properly ingested. Treat the store as damaged (below) |
+| `request id already exists` | 1 | `ingest` refuses to overwrite a record. Give the new request a different id, or drop its `id` and let one be generated |
+| `request requires a non-empty string 'action'` (or `'summary'`) | 2 | The request file is missing a required field. Fix the file; `title` / `description` are accepted fallbacks for `action` / `summary` |
+| `'risk' must be one of low, medium, high, critical` | 2 | An unrecognised risk value is refused, never guessed. Fix the file and ingest again |
+| `ledger line N is corrupt` / `request record ... is malformed` | 2 | The store is damaged and every operation fails closed until an operator repairs the file by hand. Nothing is silently skipped or repaired by guessing |
 
 ## The store
 
