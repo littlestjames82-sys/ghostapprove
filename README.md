@@ -1,5 +1,6 @@
 # GhostApprove
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/littlestjames82-sys/ghostapprove/actions/workflows/ci.yml/badge.svg)](https://github.com/littlestjames82-sys/ghostapprove/actions/workflows/ci.yml/actions)
 
 **One local inbox for every "can I do this?" your agents ask, with the decision written down against an exact fingerprint.**
 
